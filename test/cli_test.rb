@@ -2,6 +2,8 @@
 
 require_relative "test_helper"
 require "open3"
+require "stringio"
+require "agent_session_registry/cli"
 
 class CLITest < Minitest::Test
   def setup
@@ -70,6 +72,26 @@ class CLITest < Minitest::Test
     assert_match(/exactly three fields/i, stderr)
   end
 
+  def test_malformed_identity_bytes_are_input_errors_without_backtraces
+    arguments = registration_arguments("bad-bytes") + ["--local"]
+    arguments[arguments.index("--source") + 1] = "\xFF".b
+    stdout = StringIO.new
+    stderr = StringIO.new
+
+    status = AgentSessionRegistry::CLI.run(
+      arguments,
+      out: stdout,
+      err: stderr,
+      env: @env
+    )
+
+    assert_equal 2, status
+    assert_empty stdout.string
+    assert_match(/ASCII-8BIT.*UTF-8/, stderr.string)
+    assert_equal 1, stderr.string.lines.length
+    refute_match(/\.rb:\d+/, stderr.string)
+  end
+
   def test_register_validates_location_hostname_and_adapter_config
     _stdout, stderr, status = run_cli(*registration_arguments("session-1"))
     assert_equal 2, status.exitstatus
@@ -127,6 +149,29 @@ class CLITest < Minitest::Test
     )
     assert status.success?, stderr
     assert_equal "done", JSON.parse(stdout).fetch("status")
+  end
+
+  def test_human_list_has_exact_stable_layout_and_omits_redundant_goal
+    register_local("same-goal", "--name", "Same", "--goal", "Same")
+    json_stdout, json_stderr, json_status = run_cli("list", "--json")
+    assert json_status.success?, json_stderr
+    updated_at = JSON.parse(json_stdout).fetch(0).fetch("updated_at")
+
+    stdout, stderr, status = run_cli("list")
+
+    assert status.success?, stderr
+    assert_empty stderr
+    assert_equal(<<~OUTPUT, stdout)
+      key: pi:#{@hostname}:same-goal
+      status: active
+      location: local
+      hostname: #{@hostname}
+      name: Same
+      cwd: /work/repo
+      updated_at: #{updated_at}
+      resume: asr resume pi:#{@hostname}:same-goal
+    OUTPUT
+    refute_includes stdout, "goal:"
   end
 
   def test_list_filters_active_all_done_and_remote_records

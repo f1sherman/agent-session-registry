@@ -42,7 +42,7 @@ module AgentSessionRegistry
       result.is_a?(Integer) ? result : 0
     rescue HelpRequested
       0
-    rescue OptionParser::ParseError, InputError, ArgumentError, JSON::ParserError => error
+    rescue OptionParser::ParseError, InputError, ArgumentError, JSON::ParserError, EncodingError => error
       @err.puts "asr: #{error.message}"
       2
     rescue Adapter::Error, StorageError, SQLite3::Exception, SystemCallError => error

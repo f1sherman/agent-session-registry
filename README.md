@@ -18,7 +18,7 @@ can perform only a supported action such as `resume`.
 Install from Git and run the public executable:
 
 ```sh
-git clone <repository-url> agent-session-registry
+git clone https://github.com/f1sherman/agent-session-registry agent-session-registry
 cd agent-session-registry
 bundle install
 bin/asr --help
@@ -179,7 +179,7 @@ session_file = config.fetch("session_file")
 abort "invalid session file" unless session_file.is_a?(String) &&
   session_file.start_with?("/sessions/")
 
-exec("pi", "--resume", session_file)
+exec("pi", "--session", session_file)
 ```
 
 This example uses an argument array with `exec`; it does not build a shell
