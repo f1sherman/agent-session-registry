@@ -39,7 +39,7 @@ module AgentSessionRegistry
     end
 
     def ==(other)
-      other.is_a?(self.class) &&
+      other.instance_of?(self.class) &&
         source == other.source &&
         hostname == other.hostname &&
         session_id == other.session_id

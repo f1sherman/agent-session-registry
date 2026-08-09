@@ -15,6 +15,19 @@ class IdentityTest < Minitest::Test
     assert identity.frozen?
   end
 
+  def test_equality_is_symmetric_and_hashes_match_for_subclasses
+    subclass = Class.new(AgentSessionRegistry::Identity)
+    attributes = { source: "pi", hostname: "host", session_id: "session-1" }
+    identity = AgentSessionRegistry::Identity.new(**attributes)
+    subclass_identity = subclass.new(**attributes)
+    equivalent_subclass_identity = subclass.new(**attributes)
+
+    refute_equal identity, subclass_identity
+    refute_equal subclass_identity, identity
+    assert_equal subclass_identity, equivalent_subclass_identity
+    assert_equal subclass_identity.hash, equivalent_subclass_identity.hash
+  end
+
   def test_local_uses_the_system_hostname
     Socket.stub(:gethostname, "Workstation.EXAMPLE.") do
       identity = AgentSessionRegistry::Identity.local(source: "PI", session_id: "session-1")
