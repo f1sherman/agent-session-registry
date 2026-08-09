@@ -36,6 +36,17 @@ module AgentSessionRegistry
       raise Error, "could not wait for adapter process: #{error.message}"
     end
 
+    def stop(pid)
+      begin
+        Process.kill("TERM", pid)
+      rescue Errno::ESRCH
+        nil
+      rescue SystemCallError => error
+        raise Error, "could not stop adapter process: #{error.message}"
+      end
+      wait(pid)
+    end
+
     private
 
     def resolve(name)

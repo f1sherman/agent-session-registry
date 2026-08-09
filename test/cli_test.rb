@@ -3,6 +3,7 @@
 require_relative "test_helper"
 require "open3"
 require "stringio"
+require "timeout"
 require "agent_session_registry/cli"
 
 class CLITest < Minitest::Test
@@ -264,6 +265,46 @@ class CLITest < Minitest::Test
     assert_equal "done", JSON.parse(stdout).fetch("status")
   end
 
+  def test_resume_stops_adapter_promptly_when_status_update_fails
+    register_local("session-1")
+    key = "pi:#{@hostname}:session-1"
+    run_cli("done", key)
+    ready_path = File.join(@directory, "adapter-ready")
+    stopped_path = File.join(@directory, "adapter-stopped")
+    install_blocking_adapter("pi-local", ready_path:, stopped_path:)
+
+    adapter = AgentSessionRegistry::Adapter.new(directory: @adapter_directory)
+    spawn = adapter.method(:spawn)
+    adapter.define_singleton_method(:spawn) do |**arguments|
+      pid = spawn.call(**arguments)
+      Timeout.timeout(1) { sleep 0.01 until File.exist?(ready_path) }
+      pid
+    end
+    database = AgentSessionRegistry::Database.new(path: @database_path)
+    database.define_singleton_method(:update) do |_identity, _changes|
+      raise SQLite3::BusyException, "locked"
+    end
+    stdout = StringIO.new
+    stderr = StringIO.new
+    cli = AgentSessionRegistry::CLI.new(out: stdout, err: stderr, env: @env)
+    cli.instance_variable_set(:@database, database)
+
+    started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    status = Timeout.timeout(2) do
+      AgentSessionRegistry::Adapter.stub(:new, adapter) { cli.run(["resume", key]) }
+    end
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+    assert_equal 1, status
+    assert_operator elapsed, :<, 1
+    assert_match(/locked/, stderr.string)
+    assert File.exist?(stopped_path), "adapter was not terminated"
+    record = AgentSessionRegistry::Database.new(path: @database_path).fetch(
+      AgentSessionRegistry::Identity.parse(key)
+    )
+    assert_equal "done", record.fetch(:status)
+  end
+
   private
 
   def run_cli(*arguments, extra_env: {})
@@ -303,6 +344,20 @@ class CLITest < Minitest::Test
         JSON.generate([File.realpath(__FILE__), ARGV[0], ARGV[1], JSON.parse(ARGV[2])])
       )
       exit Integer(ENV.fetch("ADAPTER_EXIT", "0"))
+    RUBY
+    File.chmod(0o755, path)
+  end
+
+  def install_blocking_adapter(name, ready_path:, stopped_path:)
+    path = File.join(@adapter_directory, name)
+    File.write(path, <<~RUBY)
+      #!/usr/bin/env ruby
+      trap("TERM") do
+        File.write(#{stopped_path.inspect}, "stopped")
+        exit 0
+      end
+      File.write(#{ready_path.inspect}, "ready")
+      sleep 10
     RUBY
     File.chmod(0o755, path)
   end

@@ -218,9 +218,13 @@ module AgentSessionRegistry
       )
       begin
         database.update(identity, status: "active")
-      rescue StandardError
-        adapter.wait(pid)
-        raise
+      rescue StandardError => error
+        begin
+          adapter.stop(pid)
+        rescue Adapter::Error
+          nil
+        end
+        raise error
       end
       adapter.wait(pid)
     end
