@@ -354,7 +354,6 @@ class CLITest < Minitest::Test
       #!/usr/bin/env ruby
       trap("TERM") do
         File.write(#{stopped_path.inspect}, "stopped")
-        exit 0
       end
       File.write(#{ready_path.inspect}, "ready")
       sleep 10
