@@ -8,6 +8,8 @@ module AgentSessionRegistry
   class Adapter
     class Error < StandardError; end
 
+    STOP_GRACE_SECONDS = 0.25
+
     def initialize(directory:)
       @directory = File.realpath(directory)
     rescue SystemCallError => error
@@ -34,6 +36,25 @@ module AgentSessionRegistry
       status.exitstatus || 1
     rescue SystemCallError => error
       raise Error, "could not wait for adapter process: #{error.message}"
+    end
+
+    def stop(pid)
+      Process.kill("TERM", pid)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + STOP_GRACE_SECONDS
+      loop do
+        if (result = Process.wait2(pid, Process::WNOHANG))
+          return result.last.exitstatus || 1
+        end
+        break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+        sleep 0.01
+      end
+      Process.kill("KILL", pid)
+      wait(pid)
+    rescue Errno::ESRCH
+      wait(pid)
+    rescue SystemCallError => error
+      raise Error, "could not stop adapter process: #{error.message}"
     end
 
     private
