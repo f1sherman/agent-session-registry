@@ -53,7 +53,7 @@ module AgentSessionRegistry
     private
 
     def normalize_name(value, field)
-      normalized = value.to_s.downcase.sub(/\.\z/, "")
+      normalized = value.to_s.encode(Encoding::UTF_8).downcase.sub(/\.\z/, "")
       raise ArgumentError, "invalid #{field}: #{value.inspect}" unless NAME_PATTERN.match?(normalized)
 
       normalized

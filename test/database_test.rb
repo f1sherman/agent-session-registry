@@ -107,6 +107,35 @@ class DatabaseTest < Minitest::Test
     connection&.close
   end
 
+  def test_local_identity_hostname_round_trips_as_sqlite_text_and_rendered_key
+    binary_hostname = "Workstation.EXAMPLE.".dup.force_encoding(Encoding::ASCII_8BIT)
+
+    Socket.stub(:gethostname, binary_hostname) do
+      identity = AgentSessionRegistry::Identity.local(
+        source: "PI".dup.force_encoding(Encoding::ASCII_8BIT),
+        session_id: "session-local"
+      )
+      record = @database.register(
+        registration_attributes.merge(
+          source: identity.source,
+          hostname: identity.hostname,
+          session_id: identity.session_id
+        )
+      )
+      connection = SQLite3::Database.new(@path)
+
+      assert_equal Encoding::UTF_8, identity.source.encoding
+      assert_equal Encoding::UTF_8, identity.hostname.encoding
+      assert_equal "text", connection.get_first_value(
+        "SELECT typeof(hostname) FROM sessions WHERE session_id = ?",
+        identity.session_id
+      )
+      assert_equal record, @database.fetch(AgentSessionRegistry::Identity.parse(identity.key))
+    ensure
+      connection&.close
+    end
+  end
+
   def test_register_sets_every_fixed_column
     record = @database.register(registration_attributes)
 
