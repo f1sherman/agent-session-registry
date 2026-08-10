@@ -248,17 +248,11 @@ module AgentSessionRegistry
     end
 
     def validate_start_event(event, adapter_name:, session_id:, cwd:)
-      fields = adapter_name.to_s.split("-", -1)
-      unless fields.length == 2 && fields.none?(&:empty?)
-        raise Error, "start adapter name must be <source>-<hostname>"
-      end
-      expected = Identity.new(
-        source: fields.fetch(0),
-        hostname: fields.fetch(1),
-        session_id: session_id
-      )
       actual = event_identity(event)
-      raise Error, "registered event identity does not match adapter" unless actual == expected
+      expected_adapter_name = "#{actual.source}-#{actual.hostname}"
+      unless adapter_name.to_s == expected_adapter_name && actual.session_id == session_id
+        raise Error, "registered event identity does not match adapter"
+      end
       raise Error, "registered event cwd does not match request" unless event.fetch("cwd") == cwd
 
       session_file = event.fetch("session_file")

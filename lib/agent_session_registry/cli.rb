@@ -204,15 +204,17 @@ module AgentSessionRegistry
       end
       parse!(parser, argv)
       identity = resolve_identity(argv, identity_options)
+      socket = @env.fetch("ASR_SYNC_SOCKET", "").strip
+      timeout = adapter_timeout unless socket.empty?
+
       record = database.done(identity)
       raise InputError, "record not found" unless record
 
-      socket = @env.fetch("ASR_SYNC_SOCKET", "").strip
       unless socket.empty?
         DoneSynchronizer.call(
           socket_path: socket,
           identity: identity,
-          timeout: adapter_timeout
+          timeout: timeout
         )
       end
 

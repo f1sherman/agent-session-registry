@@ -179,7 +179,8 @@ A start-capable remote adapter name has the exact form `<source>-<hostname>`.
 ASR derives the expected new record identity from that name. For example,
 `pi-dev` can register only `pi:dev:<generated-id>`. The registered working
 directory must equal the requested directory, and the returned session file
-must be a non-empty absolute path.
+must be a non-empty absolute path. The hostname can contain hyphens. For
+example, `pi-dev-box` can register `pi:dev-box:<generated-id>`.
 
 The adapter must validate its action, key, configuration, host, and path policy
 before it starts another program. For example, install this as an executable
@@ -229,7 +230,8 @@ validation.
 
 During connected start and remote resume, ASR also creates one private Unix
 socket and passes its path in `ASR_ADAPTER_SYNC_SOCKET`. An adapter can forward
-that socket to the source host. A source-side `asr done` process sends:
+that socket to the source host. The adapter must set the forwarded path as
+`ASR_SYNC_SOCKET` for the source-side `asr done` process. That process sends:
 
 ```json
 {"action":"done","source":"pi","hostname":"host","session_id":"id"}

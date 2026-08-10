@@ -220,6 +220,24 @@ class SessionRunnerTest < Minitest::Test
     assert_equal 0, result.pop
   end
 
+  def test_start_accepts_a_hyphenated_hostname
+    hyphenated_identity = AgentSessionRegistry::Identity.parse("pi:dev-box:session-1")
+    @adapter.enqueue(
+      action: "start",
+      events: [metadata("registered").merge("hostname" => "dev-box")]
+    )
+    @adapter.enqueue(
+      action: "inspect",
+      events: [metadata("inspected").merge("hostname" => "dev-box")]
+    )
+
+    assert_equal 0, @runner.start(
+      adapter_name: "pi-dev-box",
+      cwd: "/home/brian/projects/repo"
+    )
+    assert_equal "pi-dev-box", @database.fetch(hyphenated_identity).fetch(:adapter)
+  end
+
   def test_remote_resume_inspects_then_applies_done_status_events
     register_remote
     @adapter.enqueue(

@@ -388,6 +388,27 @@ class CLITest < Minitest::Test
     thread&.join(0.5)
   end
 
+  def test_done_validates_sync_timeout_before_marking_the_record_done
+    register_local("session-1")
+
+    _stdout, stderr, status = run_cli(
+      "done", "--source", "pi", "--session-id", "session-1",
+      extra_env: {
+        "ASR_SYNC_SOCKET" => File.join(@directory, "sync.sock"),
+        "ASR_ADAPTER_TIMEOUT" => "invalid"
+      }
+    )
+
+    assert_equal 2, status.exitstatus
+    assert_match(/ASR_ADAPTER_TIMEOUT must be a positive number/, stderr)
+    identity = AgentSessionRegistry::Identity.local(
+      source: "pi", session_id: "session-1"
+    )
+    assert_equal "active", AgentSessionRegistry::Database.new(
+      path: @database_path
+    ).fetch(identity).fetch(:status)
+  end
+
   def test_resume_stops_adapter_promptly_when_status_update_fails
     register_local("session-1")
     key = "pi:#{@hostname}:session-1"
