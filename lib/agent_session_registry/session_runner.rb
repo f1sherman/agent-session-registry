@@ -187,7 +187,11 @@ module AgentSessionRegistry
       waiter.report_on_exception = false
       begin
         until waiter.join(POLL_INTERVAL)
-          consume_ready_status(event_reader, identity, eof_is_error: true)
+          result = consume_ready_status(event_reader, identity)
+          next unless result == :eof
+          break if waiter.join(POLL_INTERVAL)
+
+          raise Error, "adapter event channel closed while adapter was active"
         end
         drain_status_events(event_reader, identity)
         waiter.value
@@ -198,18 +202,14 @@ module AgentSessionRegistry
       end
     end
 
-    def consume_ready_status(event_reader, identity, eof_is_error: false)
+    def consume_ready_status(event_reader, identity)
       return :none unless IO.select([event_reader], nil, nil, 0)
 
       event = AdapterEvent.read(event_reader, timeout: @event_timeout)
       apply_status_event(event, identity)
       :event
     rescue AdapterEvent::Error => error
-      if error.message.include?("ended before newline")
-        raise Error, "adapter event channel closed while adapter was active" if eof_is_error
-
-        return :eof
-      end
+      return :eof if error.message.include?("ended before newline")
 
       raise
     end
