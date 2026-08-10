@@ -9,9 +9,9 @@ require_relative "record"
 
 module AgentSessionRegistry
   class Database
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     STATUSES = %w[active done].freeze
-    MUTABLE_FIELDS = %i[remote status name goal cwd adapter adapter_config].freeze
+    MUTABLE_FIELDS = %i[remote status name cwd adapter adapter_config].freeze
     SELECT_FIELDS = Record::FIELDS.join(", ")
 
     CREATE_SESSIONS = <<~SQL.freeze
@@ -22,7 +22,6 @@ module AgentSessionRegistry
         remote INTEGER NOT NULL CHECK (remote IN (0, 1)),
         status TEXT NOT NULL CHECK (status IN ('active', 'done')),
         name TEXT NOT NULL DEFAULT '',
-        goal TEXT NOT NULL DEFAULT '',
         cwd TEXT NOT NULL DEFAULT '',
         adapter TEXT NOT NULL,
         adapter_config TEXT NOT NULL,
@@ -135,7 +134,24 @@ module AgentSessionRegistry
         if version > SCHEMA_VERSION
           raise ArgumentError, "database schema version #{version} is newer than supported version #{SCHEMA_VERSION}"
         elsif version < SCHEMA_VERSION
-          database.execute_batch(CREATE_SESSIONS)
+          case version
+          when 0
+            database.execute_batch(CREATE_SESSIONS)
+          when 1
+            database.execute_batch(<<~SQL)
+              ALTER TABLE sessions RENAME TO sessions_v1;
+              #{CREATE_SESSIONS}
+              INSERT INTO sessions (
+                source, hostname, session_id, remote, status, name, cwd, adapter,
+                adapter_config, created_at, updated_at
+              )
+              SELECT
+                source, hostname, session_id, remote, status, name, cwd, adapter,
+                adapter_config, created_at, updated_at
+              FROM sessions_v1;
+              DROP TABLE sessions_v1;
+            SQL
+          end
           database.execute("PRAGMA user_version = #{SCHEMA_VERSION}")
         end
       end
@@ -179,7 +195,6 @@ module AgentSessionRegistry
         remote: validate_remote(attributes.fetch(:remote)),
         status: validate_status(attributes.fetch(:status)),
         name: validate_text(:name, attributes.fetch(:name, "")),
-        goal: validate_text(:goal, attributes.fetch(:goal, "")),
         cwd: validate_text(:cwd, attributes.fetch(:cwd, "")),
         adapter: validate_adapter(attributes.fetch(:adapter)),
         adapter_config: validate_adapter_config(attributes.fetch(:adapter_config))

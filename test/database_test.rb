@@ -52,7 +52,7 @@ end
 class RecordTest < Minitest::Test
   def test_fields_and_hash_conversion
     expected_fields = %i[
-      source hostname session_id remote status name goal cwd adapter adapter_config
+      source hostname session_id remote status name cwd adapter adapter_config
       created_at updated_at
     ].freeze
     attributes = expected_fields.to_h { |field| [field, field.to_s] }
@@ -75,13 +75,94 @@ class DatabaseTest < Minitest::Test
     FileUtils.remove_entry(@directory)
   end
 
-  def test_creates_schema_version_one
+  def test_creates_schema_version_two_without_goal
     connection = SQLite3::Database.new(@path)
 
-    assert_equal 1, connection.get_first_value("PRAGMA user_version")
+    assert_equal 2, connection.get_first_value("PRAGMA user_version")
     assert_equal ["sessions"], connection.execute(
       "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
     ).flatten
+    refute_includes table_columns(connection, "sessions"), "goal"
+  ensure
+    connection&.close
+  end
+
+  def test_migrates_version_one_without_copying_goal_into_name
+    path = File.join(@directory, "version-one.sqlite3")
+    connection = create_version_one_database(path)
+    connection.execute(
+      <<~SQL,
+        INSERT INTO sessions (
+          source, hostname, session_id, remote, status, name, goal, cwd,
+          adapter, adapter_config, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      SQL
+      [
+        "pi", "workstation", "session-1", 1, "done", "", "Old goal",
+        "/work/repo", "pi-local", '{"session_file":"/sessions/one.jsonl"}',
+        "2026-08-09T10:00:00.000000Z", "2026-08-09T11:00:00.000000Z"
+      ]
+    )
+    connection.close
+
+    AgentSessionRegistry::Database.new(path: path)
+
+    connection = SQLite3::Database.new(path)
+    assert_equal 2, connection.get_first_value("PRAGMA user_version")
+    refute_includes table_columns(connection, "sessions"), "goal"
+    assert_equal(
+      [
+        "pi", "workstation", "session-1", 1, "done", "", "/work/repo",
+        "pi-local", '{"session_file":"/sessions/one.jsonl"}',
+        "2026-08-09T10:00:00.000000Z", "2026-08-09T11:00:00.000000Z"
+      ],
+      connection.get_first_row(<<~SQL)
+        SELECT
+          source, hostname, session_id, remote, status, name, cwd, adapter,
+          adapter_config, created_at, updated_at
+        FROM sessions
+      SQL
+    )
+  ensure
+    connection&.close
+  end
+
+  def test_rolls_back_a_failed_version_one_migration
+    path = File.join(@directory, "malformed-version-one.sqlite3")
+    connection = SQLite3::Database.new(path)
+    connection.execute_batch(<<~SQL)
+      CREATE TABLE sessions (
+        source TEXT NOT NULL,
+        hostname TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        remote INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        goal TEXT NOT NULL DEFAULT '',
+        cwd TEXT NOT NULL DEFAULT '',
+        adapter TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source, hostname, session_id)
+      );
+      PRAGMA user_version = 1;
+    SQL
+    before_sql = connection.get_first_value(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"
+    )
+    connection.close
+
+    assert_raises(SQLite3::SQLException) do
+      AgentSessionRegistry::Database.new(path: path)
+    end
+
+    connection = SQLite3::Database.new(path)
+    assert_equal 1, connection.get_first_value("PRAGMA user_version")
+    assert_equal before_sql, connection.get_first_value(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'"
+    )
+    assert_includes table_columns(connection, "sessions"), "goal"
+    refute_includes table_columns(connection, "sessions"), "adapter_config"
   ensure
     connection&.close
   end
@@ -90,7 +171,7 @@ class DatabaseTest < Minitest::Test
     path = File.join(@directory, "newer.sqlite3")
     connection = SQLite3::Database.new(path)
     connection.execute("CREATE TABLE sentinel (value TEXT)")
-    connection.execute("PRAGMA user_version = 2")
+    connection.execute("PRAGMA user_version = 3")
     before = connection.execute(
       "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
     )
@@ -99,7 +180,7 @@ class DatabaseTest < Minitest::Test
     assert_raises(ArgumentError) { AgentSessionRegistry::Database.new(path: path) }
 
     connection = SQLite3::Database.new(path)
-    assert_equal 2, connection.get_first_value("PRAGMA user_version")
+    assert_equal 3, connection.get_first_value("PRAGMA user_version")
     assert_equal before, connection.execute(
       "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
     )
@@ -147,7 +228,6 @@ class DatabaseTest < Minitest::Test
         remote: false,
         status: "active",
         name: "Registry work",
-        goal: "Build session registry",
         cwd: "/work/repo",
         adapter: "pi-local",
         adapter_config: { "session_file" => "/sessions/one.jsonl" },
@@ -288,6 +368,33 @@ class DatabaseTest < Minitest::Test
     @now += 60
   end
 
+  def create_version_one_database(path)
+    connection = SQLite3::Database.new(path)
+    connection.execute_batch(<<~SQL)
+      CREATE TABLE sessions (
+        source TEXT NOT NULL,
+        hostname TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        remote INTEGER NOT NULL CHECK (remote IN (0, 1)),
+        status TEXT NOT NULL CHECK (status IN ('active', 'done')),
+        name TEXT NOT NULL DEFAULT '',
+        goal TEXT NOT NULL DEFAULT '',
+        cwd TEXT NOT NULL DEFAULT '',
+        adapter TEXT NOT NULL,
+        adapter_config TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source, hostname, session_id)
+      );
+      PRAGMA user_version = 1;
+    SQL
+    connection
+  end
+
+  def table_columns(connection, table)
+    connection.execute("PRAGMA table_info(#{table})").map { |row| row.fetch(1) }
+  end
+
   def identity
     AgentSessionRegistry::Identity.new(
       source: "pi",
@@ -304,7 +411,6 @@ class DatabaseTest < Minitest::Test
       remote: false,
       status: "active",
       name: "Registry work",
-      goal: "Build session registry",
       cwd: "/work/repo",
       adapter: "pi-local",
       adapter_config: { "session_file" => "/sessions/one.jsonl" }

@@ -120,7 +120,6 @@ module AgentSessionRegistry
         opts.on("--remote") { select_location(options, true) }
         opts.on("--status STATUS") { |value| options[:status] = value }
         opts.on("--name NAME") { |value| options[:name] = value }
-        opts.on("--goal GOAL") { |value| options[:goal] = value }
         opts.on("--cwd PATH") { |value| options[:cwd] = value }
         opts.on("--adapter NAME") { |value| options[:adapter] = value }
         opts.on("--adapter-config JSON") do |value|
@@ -144,7 +143,6 @@ module AgentSessionRegistry
         remote: options[:remote],
         status: options[:status],
         name: options.fetch(:name, ""),
-        goal: options.fetch(:goal, ""),
         cwd: options.fetch(:cwd, ""),
         adapter: options[:adapter],
         adapter_config: options[:adapter_config]
@@ -167,7 +165,6 @@ module AgentSessionRegistry
         end
         opts.on("--status STATUS") { |value| changes[:status] = value }
         opts.on("--name NAME") { |value| changes[:name] = value }
-        opts.on("--goal GOAL") { |value| changes[:goal] = value }
         opts.on("--cwd PATH") { |value| changes[:cwd] = value }
         opts.on("--adapter NAME") { |value| changes[:adapter] = value }
         opts.on("--adapter-config JSON") do |value|
@@ -384,8 +381,6 @@ module AgentSessionRegistry
         "hostname: #{record.fetch(:hostname)}",
         "name: #{record.fetch(:name)}"
       ]
-      goal = record.fetch(:goal)
-      lines << "goal: #{goal}" unless goal.empty? || goal == record.fetch(:name)
       lines.concat(
         [
           "cwd: #{record.fetch(:cwd)}",
