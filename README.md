@@ -40,7 +40,6 @@ asr register \
   --local \
   --status active \
   --name "Registry work" \
-  --goal "Build registry" \
   --cwd /work/repo \
   --adapter pi-local \
   --adapter-config '{"session_file":"/sessions/one.jsonl"}'
@@ -56,7 +55,6 @@ asr register \
   --hostname build.example \
   --status active \
   --name "Remote work" \
-  --goal "Run remote checks" \
   --cwd /work/repo \
   --adapter pi-local \
   --adapter-config '{"session_file":"/sessions/two.jsonl"}'
@@ -83,8 +81,8 @@ Update by rendered key or by local identity fields. Field form uses the local
 canonical hostname when `--hostname` is omitted:
 
 ```sh
-asr update pi:workstation:session-1 --name "New name"
-asr update --source pi --session-id session-1 --goal "New goal"
+asr update pi:workstation:session-1 --cwd /work/other-repo
+asr update --source pi --session-id session-1 --name "New name"
 asr update \
   --source pi \
   --hostname build.example \
@@ -115,7 +113,7 @@ Every record has these fixed columns:
 - `source`, `hostname`, and `session_id`, which form the rendered key
 - `remote`
 - `status`
-- `name`, `goal`, and `cwd`
+- `name` and `cwd`
 - `adapter` and `adapter_config`
 - `created_at` and `updated_at`
 

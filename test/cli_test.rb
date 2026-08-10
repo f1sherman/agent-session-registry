@@ -57,12 +57,25 @@ class CLITest < Minitest::Test
     assert_equal @hostname, record.fetch("hostname")
     assert_equal false, record.fetch("remote")
     assert_equal({ "session_file" => "/sessions/one.jsonl" }, record.fetch("adapter_config"))
+    assert_equal AgentSessionRegistry::Record::FIELDS.map(&:to_s), record.keys
 
     key = "pi:#{@hostname}:session-1"
     stdout, stderr, status = run_cli("show", key)
     assert status.success?, stderr
-    assert_includes stdout, "key: #{key}"
-    assert_includes stdout, "adapter_config: {\"session_file\":\"/sessions/one.jsonl\"}"
+    assert_equal(<<~OUTPUT, stdout)
+      key: #{key}
+      source: pi
+      hostname: #{@hostname}
+      session_id: session-1
+      remote: false
+      status: active
+      name: Registry work
+      cwd: /work/repo
+      adapter: pi-local
+      adapter_config: {"session_file":"/sessions/one.jsonl"}
+      created_at: #{record.fetch("created_at")}
+      updated_at: #{record.fetch("updated_at")}
+    OUTPUT
 
     stdout, stderr, status = run_cli("show", key, "--json")
     assert status.success?, stderr
@@ -128,12 +141,11 @@ class CLITest < Minitest::Test
 
     stdout, stderr, status = run_cli(
       "update", "--source", "pi", "--session-id", "session-1",
-      "--name", "Renamed", "--goal", "A new goal", "--json"
+      "--name", "Renamed", "--json"
     )
     assert status.success?, stderr
     record = JSON.parse(stdout)
     assert_equal "Renamed", record.fetch("name")
-    assert_equal "A new goal", record.fetch("goal")
 
     stdout, stderr, status = run_cli("done", key, "--json")
     assert status.success?, stderr
@@ -152,8 +164,22 @@ class CLITest < Minitest::Test
     assert_equal "done", JSON.parse(stdout).fetch("status")
   end
 
-  def test_human_list_has_exact_stable_layout_and_omits_redundant_goal
-    register_local("same-goal", "--name", "Same", "--goal", "Same")
+  def test_removed_goal_options_are_rejected
+    _stdout, stderr, status = run_cli(
+      *registration_arguments("old-register"), "--local", "--goal", "old"
+    )
+    assert_equal 2, status.exitstatus
+    assert_match(/invalid option: --goal/, stderr)
+
+    register_local("old-update")
+    key = "pi:#{@hostname}:old-update"
+    _stdout, stderr, status = run_cli("update", key, "--goal", "old")
+    assert_equal 2, status.exitstatus
+    assert_match(/invalid option: --goal/, stderr)
+  end
+
+  def test_human_list_has_exact_stable_layout
+    register_local("stable-layout", "--name", "Same")
     json_stdout, json_stderr, json_status = run_cli("list", "--json")
     assert json_status.success?, json_stderr
     updated_at = JSON.parse(json_stdout).fetch(0).fetch("updated_at")
@@ -163,21 +189,20 @@ class CLITest < Minitest::Test
     assert status.success?, stderr
     assert_empty stderr
     assert_equal(<<~OUTPUT, stdout)
-      key: pi:#{@hostname}:same-goal
+      key: pi:#{@hostname}:stable-layout
       status: active
       location: local
       hostname: #{@hostname}
       name: Same
       cwd: /work/repo
       updated_at: #{updated_at}
-      resume: asr resume pi:#{@hostname}:same-goal
+      resume: asr resume pi:#{@hostname}:stable-layout
     OUTPUT
-    refute_includes stdout, "goal:"
   end
 
   def test_list_filters_active_all_done_and_remote_records
     register_local("active", "--name", "Active name")
-    register_local("done", "--name", "Same", "--goal", "Same")
+    register_local("done", "--name", "Same")
     run_cli("done", "--source", "pi", "--session-id", "done")
     register_remote("remote")
 
@@ -186,7 +211,6 @@ class CLITest < Minitest::Test
     assert_includes stdout, "key: pi:#{@hostname}:active"
     assert_includes stdout, "location: local"
     assert_includes stdout, "name: Active name"
-    assert_includes stdout, "goal: Build registry"
     assert_match(/updated_at: \d{4}-\d\d-\d\dT.*Z/, stdout)
     assert_includes stdout, "resume: asr resume pi:#{@hostname}:active"
     assert_includes stdout, "---"
@@ -318,7 +342,6 @@ class CLITest < Minitest::Test
       "--session-id", session_id,
       "--status", "active",
       "--name", "Registry work",
-      "--goal", "Build registry",
       "--cwd", "/work/repo",
       "--adapter", "pi-local",
       "--adapter-config", '{"session_file":"/sessions/one.jsonl"}'

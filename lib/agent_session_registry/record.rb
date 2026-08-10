@@ -3,7 +3,7 @@
 module AgentSessionRegistry
   class Record
     FIELDS = %i[
-      source hostname session_id remote status name goal cwd adapter adapter_config
+      source hostname session_id remote status name cwd adapter adapter_config
       created_at updated_at
     ].freeze
 
