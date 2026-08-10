@@ -22,7 +22,7 @@ module AgentSessionRegistry
       raise ArgumentError, "timeout must be positive" unless timeout.positive?
 
       deadline = monotonic_time + timeout
-      socket = UNIXSocket.new(socket_path.to_s)
+      socket = connect(socket_path.to_s, deadline)
       request = {
         "action" => "done",
         "source" => identity.source,
@@ -41,6 +41,21 @@ module AgentSessionRegistry
     ensure
       socket&.close
     end
+
+    def connect(socket_path, deadline)
+      socket = Socket.new(Socket::AF_UNIX, Socket::SOCK_STREAM, 0)
+      result = socket.connect_nonblock(Socket.sockaddr_un(socket_path), exception: false)
+      if result == :wait_writable
+        wait(socket, deadline, write: true)
+        error_number = socket.getsockopt(Socket::SOL_SOCKET, Socket::SO_ERROR).int
+        raise SystemCallError.new("connect(2) for #{socket_path}", error_number) unless error_number.zero?
+      end
+      socket
+    rescue StandardError
+      socket&.close
+      raise
+    end
+    private_class_method :connect
 
     def write_all(io, data, deadline)
       offset = 0

@@ -85,11 +85,50 @@ class CompletionServerTest < Minitest::Test
     socket&.close
   end
 
-  def test_rejects_malformed_oversized_and_stale_requests
+  def test_stop_waits_for_an_in_progress_reconciliation
+    started = Queue.new
+    release = Queue.new
+    delayed_database = Object.new
+    database = @database
+    delayed_database.define_singleton_method(:reconcile) do |identity, changes|
+      started << true
+      release.pop
+      database.reconcile(identity, changes)
+    end
+
+    @server.stop
+    @server = AgentSessionRegistry::CompletionServer.new(
+      path: @path,
+      database: delayed_database,
+      identity_provider: -> { @current_identity }
+    ).start
+    requester = Thread.new { request(valid_request) }
+    started.pop
+    stopper = Thread.new { @server.stop }
+
+    refute stopper.join(0.05), "stop returned before reconciliation finished"
+    release << true
+    assert stopper.join(1), "stop did not finish after reconciliation"
+    assert requester.join(1), "request did not finish"
+    assert_equal "done", @database.fetch(@identity).fetch(:status)
+    refute File.exist?(@path)
+  ensure
+    release << true if release && release.empty?
+    requester&.join(0.2)
+    stopper&.join(0.2)
+  end
+
+  def test_rejects_malformed_oversized_multibyte_and_stale_requests
     @server.start
     assert_equal false, raw_request("not-json\n").fetch("ok")
     oversized = "{" + ("x" * (AgentSessionRegistry::CompletionServer::MAX_BYTES + 1)) + "}\n"
     assert_equal false, raw_request(oversized).fetch("ok")
+
+    multibyte = valid_request.merge("source" => "é" * 300)
+    response = request(multibyte)
+    assert_equal false, response.fetch("ok")
+    assert response.fetch("error").valid_encoding?
+    assert_operator response.fetch("error").bytesize, :<=, 512
     assert_equal "active", @database.fetch(@identity).fetch(:status)
 
     @server.stop

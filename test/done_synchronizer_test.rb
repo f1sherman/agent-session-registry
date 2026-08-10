@@ -62,6 +62,25 @@ class DoneSynchronizerTest < Minitest::Test
     end
   end
 
+  def test_times_out_during_nonblocking_connection_setup
+    pending_socket = Object.new
+    pending_socket.define_singleton_method(:connect_nonblock) do |_address, exception:|
+      raise "expected exception: false" unless exception == false
+
+      :wait_writable
+    end
+    pending_socket.define_singleton_method(:close) { nil }
+
+    Socket.stub(:new, pending_socket) do
+      IO.stub(:select, nil) do
+        error = assert_raises(AgentSessionRegistry::DoneSynchronizer::Error) do
+          synchronize(timeout: 0.01)
+        end
+        assert_match(/timed out/, error.message)
+      end
+    end
+  end
+
   private
 
   def synchronize(timeout:)

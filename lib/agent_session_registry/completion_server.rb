@@ -48,7 +48,7 @@ module AgentSessionRegistry
         end
         @thread
       end
-      thread&.join(1)
+      thread&.join
       cleanup
       nil
     end
@@ -137,7 +137,13 @@ module AgentSessionRegistry
     def bounded_error(error)
       message = error.message.to_s.encode("UTF-8", invalid: :replace, undef: :replace)
       message = error.class.name if message.empty?
-      message.byteslice(0, 512)
+      bounded = +""
+      message.each_char do |character|
+        break if bounded.bytesize + character.bytesize > 512
+
+        bounded << character
+      end
+      bounded
     end
 
     def cleanup
