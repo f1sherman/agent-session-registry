@@ -7,6 +7,7 @@ require "sqlite3"
 
 require_relative "adapter"
 require_relative "database"
+require_relative "done_synchronizer"
 require_relative "identity"
 require_relative "record"
 
@@ -17,6 +18,7 @@ module AgentSessionRegistry
     class HelpRequested < StandardError; end
 
     COMMANDS = %w[list show register update done resume].freeze
+    DEFAULT_ADAPTER_TIMEOUT = 5.0
 
     def self.run(argv, out:, err:, env:)
       new(out: out, err: err, env: env).run(argv.dup)
@@ -45,7 +47,8 @@ module AgentSessionRegistry
     rescue OptionParser::ParseError, InputError, ArgumentError, JSON::ParserError, EncodingError => error
       @err.puts "asr: #{error.message}"
       2
-    rescue Adapter::Error, StorageError, SQLite3::Exception, SystemCallError => error
+    rescue Adapter::Error, DoneSynchronizer::Error, StorageError,
+      SQLite3::Exception, SystemCallError => error
       @err.puts "asr: #{error.message}"
       1
     end
@@ -192,8 +195,18 @@ module AgentSessionRegistry
         add_help(opts)
       end
       parse!(parser, argv)
-      record = database.done(resolve_identity(argv, identity_options))
+      identity = resolve_identity(argv, identity_options)
+      record = database.done(identity)
       raise InputError, "record not found" unless record
+
+      socket = @env.fetch("ASR_SYNC_SOCKET", "").strip
+      unless socket.empty?
+        DoneSynchronizer.call(
+          socket_path: socket,
+          identity: identity,
+          timeout: adapter_timeout
+        )
+      end
 
       write_record(record, json: output_options[:json])
     end
@@ -344,6 +357,15 @@ module AgentSessionRegistry
         "ASR_ADAPTER_DIR",
         File.join(Dir.home, ".local/lib/agent-session-registry/adapters")
       )
+    end
+
+    def adapter_timeout
+      value = Float(@env.fetch("ASR_ADAPTER_TIMEOUT", DEFAULT_ADAPTER_TIMEOUT))
+      raise InputError, "ASR_ADAPTER_TIMEOUT must be positive" unless value.positive?
+
+      value
+    rescue ArgumentError, TypeError
+      raise InputError, "ASR_ADAPTER_TIMEOUT must be a positive number"
     end
 
     def sort_records(records)

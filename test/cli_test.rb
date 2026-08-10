@@ -289,6 +289,66 @@ class CLITest < Minitest::Test
     assert_equal "done", JSON.parse(stdout).fetch("status")
   end
 
+  def test_done_synchronizes_once_after_local_commit_and_waits_for_acknowledgment
+    register_local("session-1")
+    socket_path = File.join(@directory, "sync.sock")
+    server = UNIXServer.new(socket_path)
+    requests = Queue.new
+    observed_statuses = Queue.new
+    thread = Thread.new do
+      2.times do |index|
+        socket = server.accept
+        requests << JSON.parse(socket.gets)
+        identity = AgentSessionRegistry::Identity.local(
+          source: "pi", session_id: "session-1"
+        )
+        observed_statuses << AgentSessionRegistry::Database.new(
+          path: @database_path
+        ).fetch(identity).fetch(:status)
+        sleep 0.1 if index == 1
+        response = if index.zero?
+          { "ok" => false, "error" => "sync failed" }
+        else
+          { "ok" => true, "status" => "done" }
+        end
+        socket.puts(JSON.generate(response))
+        socket.close
+      end
+    end
+
+    _stdout, stderr, status = run_cli(
+      "done", "--source", "pi", "--session-id", "session-1",
+      extra_env: { "ASR_SYNC_SOCKET" => socket_path }
+    )
+    assert_equal 1, status.exitstatus
+    assert_match(/sync failed/, stderr)
+    assert_equal "done", observed_statuses.pop
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    stdout, stderr, status = run_cli(
+      "done", "--source", "pi", "--session-id", "session-1", "--json",
+      extra_env: { "ASR_SYNC_SOCKET" => socket_path }
+    )
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    assert status.success?, stderr
+    assert_operator elapsed, :>=, 0.08
+    assert_equal "done", JSON.parse(stdout).fetch("status")
+    assert_equal "done", observed_statuses.pop
+
+    expected = {
+      "action" => "done",
+      "source" => "pi",
+      "hostname" => @hostname,
+      "session_id" => "session-1"
+    }
+    assert_equal expected, requests.pop
+    assert_equal expected, requests.pop
+    assert requests.empty?
+  ensure
+    server&.close
+    thread&.join(0.5)
+  end
+
   def test_resume_stops_adapter_promptly_when_status_update_fails
     register_local("session-1")
     key = "pi:#{@hostname}:session-1"
