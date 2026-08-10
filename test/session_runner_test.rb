@@ -6,6 +6,30 @@ require "agent_session_registry/adapter"
 require "agent_session_registry/session_runner"
 
 class SessionRunnerTest < Minitest::Test
+  class BlockingRegisterDatabase
+    attr_reader :entered, :release
+
+    def initialize(database)
+      @database = database
+      @entered = Queue.new
+      @release = Queue.new
+    end
+
+    def register(attributes)
+      @entered << true
+      @release.pop
+      @database.register(attributes)
+    end
+
+    def method_missing(name, *arguments, **keywords, &block)
+      @database.public_send(name, *arguments, **keywords, &block)
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      @database.respond_to?(name, include_private) || super
+    end
+  end
+
   class FakeAdapter
     attr_reader :spawns, :stops
 
@@ -19,7 +43,7 @@ class SessionRunnerTest < Minitest::Test
 
     def enqueue(
       action:, events: [], status: 0, gate: nil, writer_gate: nil,
-      on_spawn: nil
+      on_spawn: nil, spawn_error: nil
     )
       @behaviors << {
         action: action,
@@ -27,7 +51,8 @@ class SessionRunnerTest < Minitest::Test
         status: status,
         gate: gate,
         writer_gate: writer_gate,
-        on_spawn: on_spawn
+        on_spawn: on_spawn,
+        spawn_error: spawn_error
       }
     end
 
@@ -35,6 +60,7 @@ class SessionRunnerTest < Minitest::Test
       behavior = @behaviors.shift or raise "unexpected adapter spawn"
       raise "expected #{behavior[:action]}, got #{arguments[:action]}" unless
         behavior.fetch(:action) == arguments.fetch(:action)
+      raise behavior.fetch(:spawn_error) if behavior.fetch(:spawn_error)
 
       @next_pid += 1
       pid = @next_pid
@@ -144,6 +170,56 @@ class SessionRunnerTest < Minitest::Test
     assert_equal "Remote name", @database.fetch(@identity).fetch(:name)
   end
 
+  def test_start_publishes_completion_identity_only_after_registration
+    blocking_database = BlockingRegisterDatabase.new(@database)
+    runner = AgentSessionRegistry::SessionRunner.new(
+      database: blocking_database,
+      adapter: @adapter,
+      runtime_root: File.join(@directory, "runtime"),
+      session_id_generator: -> { "session-1" },
+      event_timeout: 0.1
+    )
+    gate = Queue.new
+    socket = Queue.new
+    @adapter.enqueue(
+      action: "start",
+      events: [metadata("registered")],
+      gate: gate,
+      on_spawn: ->(arguments) { socket << arguments.fetch(:sync_socket) }
+    )
+    @adapter.enqueue(
+      action: "inspect",
+      events: [metadata("inspected", status: "done")]
+    )
+
+    result = Queue.new
+    thread = Thread.new do
+      result << runner.start(
+        adapter_name: "pi-dev",
+        cwd: "/home/brian/projects/repo"
+      )
+    end
+    socket_path = socket.pop
+    blocking_database.entered.pop
+
+    early_response = synchronize_done(socket_path)
+    assert_equal false, early_response.fetch("ok")
+    assert_match(/identity is not available/, early_response.fetch("error"))
+    assert_nil @database.fetch(@identity)
+
+    blocking_database.release << true
+    wait_for_record
+    assert_equal(
+      { "ok" => true, "status" => "done" },
+      synchronize_done(socket_path)
+    )
+    assert_equal "done", @database.fetch(@identity).fetch(:status)
+
+    gate << true
+    assert thread.join(1), "start did not finish"
+    assert_equal 0, result.pop
+  end
+
   def test_remote_resume_inspects_then_applies_done_status_events
     register_remote
     @adapter.enqueue(
@@ -237,6 +313,18 @@ class SessionRunnerTest < Minitest::Test
     assert_equal 1, @adapter.stops.length
   end
 
+  def test_start_fails_when_adapter_exits_before_registration
+    @adapter.enqueue(action: "start", events: [], status: 19)
+
+    error = assert_raises(AgentSessionRegistry::AdapterEvent::Error) do
+      @runner.start(adapter_name: "pi-dev", cwd: "/home/brian/projects/repo")
+    end
+
+    assert_match(/ended before newline/, error.message)
+    assert_nil @database.fetch(@identity)
+    assert_equal 1, @adapter.stops.length
+  end
+
   def test_post_start_inspection_failure_preserves_registered_record
     @adapter.enqueue(action: "start", events: [metadata("registered")])
     @adapter.enqueue(action: "inspect", events: [{ "type" => "bad" }])
@@ -246,6 +334,27 @@ class SessionRunnerTest < Minitest::Test
     end
 
     assert_equal "active", @database.fetch(@identity).fetch(:status)
+  end
+
+  def test_inspect_closes_event_descriptors_when_spawn_fails
+    register_remote
+    pipes = []
+    original_pipe = IO.method(:pipe)
+    @adapter.enqueue(
+      action: "inspect",
+      spawn_error: AgentSessionRegistry::Adapter::Error.new("spawn failed")
+    )
+
+    IO.stub(:pipe, lambda {
+      original_pipe.call.tap { |pair| pipes << pair }
+    }) do
+      assert_raises(AgentSessionRegistry::Adapter::Error) do
+        @runner.inspect(identity: @identity, record: @database.fetch(@identity))
+      end
+    end
+
+    assert_equal 1, pipes.length
+    assert pipes.flatten.all?(&:closed?), "inspect leaked an event descriptor"
   end
 
   def test_inspect_timeout_stops_adapter
@@ -321,6 +430,19 @@ class SessionRunnerTest < Minitest::Test
       adapter: "pi-dev",
       adapter_config: { "session_file" => session_file }
     )
+  end
+
+  def synchronize_done(socket_path)
+    socket = UNIXSocket.new(socket_path)
+    socket.puts(JSON.generate(
+      "action" => "done",
+      "source" => "pi",
+      "hostname" => "dev",
+      "session_id" => "session-1"
+    ))
+    JSON.parse(socket.gets)
+  ensure
+    socket&.close
   end
 
   def wait_for_record

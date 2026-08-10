@@ -49,11 +49,11 @@ module AgentSessionRegistry
             AdapterEvent.read(event_reader, timeout: @event_timeout),
             session_id: session_id
           )
-          identity = event_identity(event)
+          registered_identity = event_identity(event)
           record = @database.register(
-            source: identity.source,
-            hostname: identity.hostname,
-            session_id: identity.session_id,
+            source: registered_identity.source,
+            hostname: registered_identity.hostname,
+            session_id: registered_identity.session_id,
             remote: true,
             status: event.fetch("status"),
             name: event.fetch("name") || "",
@@ -61,6 +61,7 @@ module AgentSessionRegistry
             adapter: adapter_name,
             adapter_config: { "session_file" => event.fetch("session_file") }
           )
+          identity = registered_identity
           wait_with_status_events(pid, event_reader, identity)
         rescue StandardError
           stop_adapter(pid)
@@ -99,16 +100,19 @@ module AgentSessionRegistry
 
     def inspect(identity:, record:)
       identity = coerce_identity(identity)
-      event_reader, event_writer = IO.pipe
-      pid = @adapter.spawn(
-        name: record.fetch(:adapter),
-        action: "inspect",
-        key: identity.key,
-        config: record.fetch(:adapter_config),
-        event_io: event_writer
-      )
-      event_writer.close
+      event_reader = nil
+      event_writer = nil
+      pid = nil
       begin
+        event_reader, event_writer = IO.pipe
+        pid = @adapter.spawn(
+          name: record.fetch(:adapter),
+          action: "inspect",
+          key: identity.key,
+          config: record.fetch(:adapter_config),
+          event_io: event_writer
+        )
+        event_writer.close
         event = AdapterEvent.validate_inspected(
           AdapterEvent.read(event_reader, timeout: @event_timeout),
           identity: identity
@@ -127,14 +131,14 @@ module AgentSessionRegistry
 
         reconciled
       rescue Timeout::Error
-        stop_adapter(pid)
+        stop_adapter(pid) if pid
         raise Error, "adapter inspection timed out"
       rescue StandardError
-        stop_adapter(pid)
+        stop_adapter(pid) if pid
         raise
       ensure
-        event_reader.close unless event_reader.closed?
-        event_writer.close unless event_writer.closed?
+        event_reader&.close unless event_reader&.closed?
+        event_writer&.close unless event_writer&.closed?
       end
     end
 
