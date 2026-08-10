@@ -16,17 +16,22 @@ module AgentSessionRegistry
       raise Error, "adapter directory is unavailable: #{error.message}"
     end
 
-    def spawn(name:, action:, key:, config:)
+    def spawn(name:, action:, key:, config:, event_io: nil, sync_socket: nil)
       candidate = resolve(name)
-      Process.spawn(
-        candidate,
-        action,
-        key,
-        JSON.generate(config),
-        in: $stdin,
-        out: $stdout,
-        err: $stderr
-      )
+      environment = {}
+      options = { in: $stdin, out: $stdout, err: $stderr }
+      if event_io
+        event_fd = event_io.fileno
+        environment["ASR_ADAPTER_EVENT_FD"] = event_fd.to_s
+        options[event_fd] = event_io
+      end
+      if sync_socket
+        environment["ASR_ADAPTER_SYNC_SOCKET"] = sync_socket.to_s
+      end
+
+      arguments = [candidate, action, key, JSON.generate(config), options]
+      arguments.unshift(environment) unless environment.empty?
+      Process.spawn(*arguments)
     rescue SystemCallError => error
       raise Error, "could not start adapter #{name.inspect}: #{error.message}"
     end

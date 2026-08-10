@@ -44,6 +44,68 @@ class AdapterTest < Minitest::Test
     end
   end
 
+  def test_passes_only_the_private_event_descriptor_and_sync_socket
+    key = "pi:workstation:session-1"
+    config = { "session_file" => "/sessions/one.jsonl" }
+    event_read, event_write = IO.pipe
+    spawned_arguments = nil
+
+    Process.stub(:spawn, ->(*arguments) { spawned_arguments = arguments; 12_345 }) do
+      pid = @adapter.spawn(
+        name: "pi-local",
+        action: "resume",
+        key: key,
+        config: config,
+        event_io: event_write,
+        sync_socket: "/tmp/asr-sync.sock"
+      )
+      assert_equal 12_345, pid
+    end
+
+    assert_equal(
+      [
+        {
+          "ASR_ADAPTER_EVENT_FD" => event_write.fileno.to_s,
+          "ASR_ADAPTER_SYNC_SOCKET" => "/tmp/asr-sync.sock"
+        },
+        @adapter_path,
+        "resume",
+        key,
+        JSON.generate(config),
+        {
+          in: $stdin,
+          out: $stdout,
+          err: $stderr,
+          event_write.fileno => event_write
+        }
+      ],
+      spawned_arguments
+    )
+  ensure
+    event_read&.close
+    event_write&.close
+  end
+
+  def test_passes_sync_socket_without_an_event_descriptor
+    spawned_arguments = nil
+
+    Process.stub(:spawn, ->(*arguments) { spawned_arguments = arguments; 12_345 }) do
+      @adapter.spawn(
+        name: "pi-local",
+        action: "resume",
+        key: "pi:workstation:session-1",
+        config: {},
+        sync_socket: "/tmp/asr-sync.sock"
+      )
+    end
+
+    assert_equal(
+      { "ASR_ADAPTER_SYNC_SOCKET" => "/tmp/asr-sync.sock" },
+      spawned_arguments.first
+    )
+    refute spawned_arguments.last.keys.any? { |key| key.is_a?(Integer) }
+  end
+
   def test_rejects_invalid_adapter_names
     ["nested/adapter", "..", "pi..local", "Pi-local", "pi;echo", "pi local"].each do |name|
       assert_raises(ArgumentError, name) do
