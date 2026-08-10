@@ -280,6 +280,34 @@ class SessionRunnerTest < Minitest::Test
     refute @adapter.spawns.fetch(0).key?(:sync_socket)
   end
 
+  def test_start_rejects_registration_authority_mismatches
+    cases = {
+      "source" => metadata("registered").merge("source" => "codex"),
+      "hostname" => metadata("registered").merge("hostname" => "attacker"),
+      "cwd" => metadata("registered").merge("cwd" => "/home/brian/projects/other"),
+      "empty session file" => metadata("registered").merge("session_file" => ""),
+      "relative session file" => metadata("registered").merge("session_file" => "relative.jsonl")
+    }
+
+    cases.each do |label, event|
+      adapter = FakeAdapter.new
+      adapter.enqueue(action: "start", events: [event])
+      runner = AgentSessionRegistry::SessionRunner.new(
+        database: @database,
+        adapter: adapter,
+        runtime_root: File.join(@directory, "runtime"),
+        session_id_generator: -> { "session-1" },
+        event_timeout: 0.05
+      )
+
+      assert_raises(AgentSessionRegistry::SessionRunner::Error, label) do
+        runner.start(adapter_name: "pi-dev", cwd: "/home/brian/projects/repo")
+      end
+      assert_nil @database.fetch(@identity), label
+      assert_equal 1, adapter.stops.length, label
+    end
+  end
+
   def test_start_rejects_malformed_or_missing_registration_and_stops_adapter
     @adapter.enqueue(action: "start", events: [{ "type" => "bad" }])
 
@@ -372,6 +400,37 @@ class SessionRunnerTest < Minitest::Test
 
     assert_match(/inspection timed out/, error.message)
     assert_equal 1, @adapter.stops.length
+  end
+
+  def test_inspect_rejects_cwd_and_session_file_drift
+    register_remote
+    [
+      metadata("inspected").merge("cwd" => "/home/brian/projects/other"),
+      metadata("inspected").merge("session_file" => "/sessions/other.jsonl")
+    ].each do |event|
+      @adapter.enqueue(action: "inspect", events: [event])
+      assert_raises(AgentSessionRegistry::SessionRunner::Error) do
+        @runner.inspect(identity: @identity, record: @database.fetch(@identity))
+      end
+    end
+
+    record = @database.fetch(@identity)
+    assert_equal "/home/brian/projects/repo", record.fetch(:cwd)
+    assert_equal session_file, record.fetch(:adapter_config).fetch("session_file")
+  end
+
+  def test_event_channel_eof_while_remote_adapter_is_active_is_an_error
+    register_remote
+    @adapter.enqueue(action: "inspect", events: [metadata("inspected")])
+    gate = Queue.new
+    @adapter.enqueue(action: "resume", events: [], gate: gate)
+
+    error = assert_raises(AgentSessionRegistry::SessionRunner::Error) do
+      @runner.resume(identity: @identity, record: @database.fetch(@identity))
+    end
+
+    assert_match(/event channel closed/, error.message)
+    refute_empty @adapter.stops
   end
 
   def test_inspect_cannot_change_location_or_adapter

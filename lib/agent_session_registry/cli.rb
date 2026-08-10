@@ -50,7 +50,10 @@ module AgentSessionRegistry
     rescue OptionParser::ParseError, InputError, ArgumentError, JSON::ParserError, EncodingError => error
       @err.puts "asr: #{error.message}"
       2
-    rescue Adapter::Error, AdapterEvent::Error, DoneSynchronizer::Error,
+    rescue DoneSynchronizer::Error => error
+      @err.puts "asr: source record is done, but synchronization failed: #{error.message}"
+      3
+    rescue Adapter::Error, AdapterEvent::Error,
       SessionRunner::Error, StorageError, SQLite3::Exception,
       SystemCallError => error
       @err.puts "asr: #{error.message}"

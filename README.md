@@ -175,6 +175,12 @@ configuration:
 {"session_id":"<generated-id>","cwd":"<requested-working-directory>"}
 ```
 
+A start-capable remote adapter name has the exact form `<source>-<hostname>`.
+ASR derives the expected new record identity from that name. For example,
+`pi-dev` can register only `pi:dev:<generated-id>`. The registered working
+directory must equal the requested directory, and the returned session file
+must be a non-empty absolute path.
+
 The adapter must validate its action, key, configuration, host, and path policy
 before it starts another program. For example, install this as an executable
 file named `pi-local` in the adapter directory:
@@ -240,6 +246,10 @@ with one of:
 This channel grants only an idempotent done transition for the active record.
 It is not a general command endpoint. ASR removes the socket when the adapter
 exits. No daemon, TCP listener, or standard-output protocol is used.
+
+`asr done` exits with status `3` only when it has already marked the source
+record done but the connection-scoped synchronization failed. Input failures
+exit with status `2`. Other runtime failures exit with status `1`.
 
 ## Tests
 

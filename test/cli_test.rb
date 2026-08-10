@@ -359,8 +359,8 @@ class CLITest < Minitest::Test
       "done", "--source", "pi", "--session-id", "session-1",
       extra_env: { "ASR_SYNC_SOCKET" => socket_path }
     )
-    assert_equal 1, status.exitstatus
-    assert_match(/sync failed/, stderr)
+    assert_equal 3, status.exitstatus
+    assert_match(/source record is done, but synchronization failed.*sync failed/, stderr)
     assert_equal "done", observed_statuses.pop
 
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -419,7 +419,7 @@ class CLITest < Minitest::Test
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
 
     assert_equal 1, status
-    assert_operator elapsed, :<, 1
+    assert_operator elapsed, :<, 2
     assert_match(/locked/, stderr.string)
     assert File.exist?(stopped_path), "adapter was not terminated"
     record = AgentSessionRegistry::Database.new(path: @database_path).fetch(

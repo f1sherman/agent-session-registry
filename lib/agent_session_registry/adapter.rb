@@ -8,7 +8,7 @@ module AgentSessionRegistry
   class Adapter
     class Error < StandardError; end
 
-    STOP_GRACE_SECONDS = 0.25
+    STOP_GRACE_SECONDS = 1.0
 
     def initialize(directory:)
       @directory = File.realpath(directory)

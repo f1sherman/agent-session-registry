@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "pathname"
 require "securerandom"
 require "timeout"
 
@@ -49,7 +50,12 @@ module AgentSessionRegistry
             AdapterEvent.read(event_reader, timeout: @event_timeout),
             session_id: session_id
           )
-          registered_identity = event_identity(event)
+          registered_identity = validate_start_event(
+            event,
+            adapter_name: adapter_name,
+            session_id: session_id,
+            cwd: cwd
+          )
           record = @database.register(
             source: registered_identity.source,
             hostname: registered_identity.hostname,
@@ -120,12 +126,11 @@ module AgentSessionRegistry
         status = Timeout.timeout(@event_timeout) { @adapter.wait(pid) }
         raise Error, "adapter inspection failed with status #{status}" unless status.zero?
 
+        validate_inspection_authority(event, record)
         reconciled = @database.reconcile(
           identity,
           status: event.fetch("status"),
-          name: event.fetch("name") || "",
-          cwd: event.fetch("cwd"),
-          adapter_config: { "session_file" => event.fetch("session_file") }
+          name: event.fetch("name") || ""
         )
         raise Error, "record not found during inspection: #{identity.key}" unless reconciled
 
@@ -182,7 +187,7 @@ module AgentSessionRegistry
       waiter.report_on_exception = false
       begin
         until waiter.join(POLL_INTERVAL)
-          consume_ready_status(event_reader, identity)
+          consume_ready_status(event_reader, identity, eof_is_error: true)
         end
         drain_status_events(event_reader, identity)
         waiter.value
@@ -193,14 +198,18 @@ module AgentSessionRegistry
       end
     end
 
-    def consume_ready_status(event_reader, identity)
+    def consume_ready_status(event_reader, identity, eof_is_error: false)
       return :none unless IO.select([event_reader], nil, nil, 0)
 
       event = AdapterEvent.read(event_reader, timeout: @event_timeout)
       apply_status_event(event, identity)
       :event
     rescue AdapterEvent::Error => error
-      return :eof if error.message.include?("ended before newline")
+      if error.message.include?("ended before newline")
+        raise Error, "adapter event channel closed while adapter was active" if eof_is_error
+
+        return :eof
+      end
 
       raise
     end
@@ -236,6 +245,42 @@ module AgentSessionRegistry
         hostname: event.fetch("hostname"),
         session_id: event.fetch("session_id")
       )
+    end
+
+    def validate_start_event(event, adapter_name:, session_id:, cwd:)
+      fields = adapter_name.to_s.split("-", -1)
+      unless fields.length == 2 && fields.none?(&:empty?)
+        raise Error, "start adapter name must be <source>-<hostname>"
+      end
+      expected = Identity.new(
+        source: fields.fetch(0),
+        hostname: fields.fetch(1),
+        session_id: session_id
+      )
+      actual = event_identity(event)
+      raise Error, "registered event identity does not match adapter" unless actual == expected
+      raise Error, "registered event cwd does not match request" unless event.fetch("cwd") == cwd
+
+      session_file = event.fetch("session_file")
+      unless !session_file.empty? && Pathname.new(session_file).absolute?
+        raise Error, "registered event session_file must be an absolute path"
+      end
+
+      actual
+    rescue ArgumentError => error
+      raise Error, "start adapter identity is invalid: #{error.message}"
+    end
+
+    def validate_inspection_authority(event, record)
+      unless event.fetch("cwd") == record.fetch(:cwd)
+        raise Error, "inspected event cwd does not match stored record"
+      end
+      expected_file = record.fetch(:adapter_config).fetch("session_file")
+      unless event.fetch("session_file") == expected_file
+        raise Error, "inspected event session_file does not match stored record"
+      end
+    rescue KeyError
+      raise Error, "stored record is missing session_file"
     end
 
     def coerce_identity(identity)
