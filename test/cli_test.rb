@@ -32,6 +32,7 @@ class CLITest < Minitest::Test
     stdout, stderr, status = run_cli("--help")
     assert status.success?, stderr
     assert_includes stdout, "asr list"
+    assert_includes stdout, "asr start"
     assert_empty stderr
 
     stdout, stderr, status = run_cli("list", "--help")
@@ -47,6 +48,44 @@ class CLITest < Minitest::Test
     _stdout, stderr, status = run_cli("archive")
     assert_equal 2, status.exitstatus
     assert_match(/unsupported command.*archive/i, stderr)
+  end
+
+  def test_start_parses_one_adapter_and_an_absolute_cwd
+    calls = []
+    runner = Object.new
+    runner.define_singleton_method(:start) do |adapter_name:, cwd:|
+      calls << [adapter_name, cwd]
+      19
+    end
+    cli = AgentSessionRegistry::CLI.new(
+      out: StringIO.new,
+      err: StringIO.new,
+      env: @env
+    )
+    cli.instance_variable_set(:@session_runner, runner)
+
+    assert_equal 19, cli.run([
+      "start", "pi-dev", "--cwd", "/home/brian/projects/repo"
+    ])
+    assert_equal [["pi-dev", "/home/brian/projects/repo"]], calls
+
+    invalid = [
+      ["start", "pi-dev"],
+      ["start", "--cwd", "/home/brian/projects/repo"],
+      ["start", "pi-dev", "extra", "--cwd", "/home/brian/projects/repo"],
+      ["start", "pi-dev", "--cwd", "relative/path"],
+      ["start", "pi-dev", "--cwd", ""],
+      ["start", "pi-dev", "--cwd", "/work", "--name", "Not supported"]
+    ]
+    invalid.each do |arguments|
+      output = StringIO.new
+      errors = StringIO.new
+      invalid_cli = AgentSessionRegistry::CLI.new(out: output, err: errors, env: @env)
+      invalid_cli.instance_variable_set(:@session_runner, runner)
+      assert_equal 2, invalid_cli.run(arguments), arguments.join(" ")
+      assert_empty output.string
+    end
+    assert_equal 1, calls.length
   end
 
   def test_register_and_show_support_human_and_json_output
