@@ -19,7 +19,7 @@ module AgentSessionRegistry
     def spawn(name:, action:, key:, config:, event_io: nil, sync_socket: nil)
       candidate = resolve(name)
       environment = {}
-      options = { in: $stdin, out: $stdout, err: $stderr }
+      options = { in: $stdin, out: $stdout, err: $stderr, close_others: true }
       if event_io
         event_fd = event_io.fileno
         environment["ASR_ADAPTER_EVENT_FD"] = event_fd.to_s

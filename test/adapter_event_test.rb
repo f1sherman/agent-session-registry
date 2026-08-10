@@ -44,6 +44,19 @@ class AdapterEventTest < Minitest::Test
     assert_read_error("a" * 17, max_bytes: 16)
   end
 
+  def test_enforces_the_default_sixteen_kibibyte_limit
+    prefix = '{"padding":"'
+    suffix = '"}'
+    padding = "a" * (AgentSessionRegistry::AdapterEvent::MAX_BYTES - prefix.bytesize - suffix.bytesize)
+    exact_payload = "#{prefix}#{padding}#{suffix}"
+
+    assert_equal(
+      { "padding" => padding },
+      read_event(exact_payload)
+    )
+    assert_read_error("#{exact_payload} ")
+  end
+
   def test_times_out_before_a_complete_event
     reader, writer = IO.pipe
     writer.write("{")
@@ -152,21 +165,36 @@ class AdapterEventTest < Minitest::Test
 
   private
 
-  def assert_read_error(content, close_writer: false, max_bytes: 100)
+  def read_event(content)
     reader, writer = IO.pipe
-    writer.write(content)
-    writer.close if close_writer
+    writer_thread = Thread.new do
+      writer.write("#{content}\n")
+      writer.close
+    end
 
+    AgentSessionRegistry::AdapterEvent.read(reader, timeout: 1)
+  ensure
+    reader&.close
+    writer&.close unless writer&.closed?
+    writer_thread&.join
+  end
+
+  def assert_read_error(content, close_writer: false, max_bytes: nil)
+    reader, writer = IO.pipe
+    writer_thread = Thread.new do
+      writer.write(content)
+      writer.close if close_writer
+    end
+
+    arguments = { timeout: 1 }
+    arguments[:max_bytes] = max_bytes if max_bytes
     assert_raises(AgentSessionRegistry::AdapterEvent::Error) do
-      AgentSessionRegistry::AdapterEvent.read(
-        reader,
-        timeout: 0.01,
-        max_bytes: max_bytes
-      )
+      AgentSessionRegistry::AdapterEvent.read(reader, **arguments)
     end
   ensure
     reader&.close
     writer&.close unless writer&.closed?
+    writer_thread&.join
   end
 
   def invalid_events(event)
