@@ -238,6 +238,20 @@ class SessionRunnerTest < Minitest::Test
     assert_equal "pi-dev-box", @database.fetch(hyphenated_identity).fetch(:adapter)
   end
 
+  def test_start_rejects_a_different_source_boundary
+    alternate_identity = AgentSessionRegistry::Identity.parse("pi-dev:box:session-1")
+    @adapter.enqueue(
+      action: "start",
+      events: [metadata("registered").merge("source" => "pi-dev", "hostname" => "box")]
+    )
+
+    assert_raises(AgentSessionRegistry::SessionRunner::Error) do
+      @runner.start(adapter_name: "pi-dev-box", cwd: "/home/brian/projects/repo")
+    end
+    assert_nil @database.fetch(alternate_identity)
+    assert_equal 1, @adapter.stops.length
+  end
+
   def test_remote_resume_inspects_then_applies_done_status_events
     register_remote
     @adapter.enqueue(
