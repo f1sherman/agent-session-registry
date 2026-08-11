@@ -1,4 +1,5 @@
 source "https://rubygems.org"
 gem "minitest", "< 7"
+gem "minitest-mock"
 gem "rake"
 gem "sqlite3"
