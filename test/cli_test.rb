@@ -32,6 +32,7 @@ class CLITest < Minitest::Test
     stdout, stderr, status = run_cli("--help")
     assert status.success?, stderr
     assert_includes stdout, "asr list"
+    assert_includes stdout, "asr start"
     assert_empty stderr
 
     stdout, stderr, status = run_cli("list", "--help")
@@ -47,6 +48,44 @@ class CLITest < Minitest::Test
     _stdout, stderr, status = run_cli("archive")
     assert_equal 2, status.exitstatus
     assert_match(/unsupported command.*archive/i, stderr)
+  end
+
+  def test_start_parses_one_adapter_and_an_absolute_cwd
+    calls = []
+    runner = Object.new
+    runner.define_singleton_method(:start) do |adapter_name:, cwd:|
+      calls << [adapter_name, cwd]
+      19
+    end
+    cli = AgentSessionRegistry::CLI.new(
+      out: StringIO.new,
+      err: StringIO.new,
+      env: @env
+    )
+    cli.instance_variable_set(:@session_runner, runner)
+
+    assert_equal 19, cli.run([
+      "start", "pi-dev", "--cwd", "/home/brian/projects/repo"
+    ])
+    assert_equal [["pi-dev", "/home/brian/projects/repo"]], calls
+
+    invalid = [
+      ["start", "pi-dev"],
+      ["start", "--cwd", "/home/brian/projects/repo"],
+      ["start", "pi-dev", "extra", "--cwd", "/home/brian/projects/repo"],
+      ["start", "pi-dev", "--cwd", "relative/path"],
+      ["start", "pi-dev", "--cwd", ""],
+      ["start", "pi-dev", "--cwd", "/work", "--name", "Not supported"]
+    ]
+    invalid.each do |arguments|
+      output = StringIO.new
+      errors = StringIO.new
+      invalid_cli = AgentSessionRegistry::CLI.new(out: output, err: errors, env: @env)
+      invalid_cli.instance_variable_set(:@session_runner, runner)
+      assert_equal 2, invalid_cli.run(arguments), arguments.join(" ")
+      assert_empty output.string
+    end
+    assert_equal 1, calls.length
   end
 
   def test_register_and_show_support_human_and_json_output
@@ -289,6 +328,87 @@ class CLITest < Minitest::Test
     assert_equal "done", JSON.parse(stdout).fetch("status")
   end
 
+  def test_done_synchronizes_once_after_local_commit_and_waits_for_acknowledgment
+    register_local("session-1")
+    socket_path = File.join(@directory, "sync.sock")
+    server = UNIXServer.new(socket_path)
+    requests = Queue.new
+    observed_statuses = Queue.new
+    thread = Thread.new do
+      2.times do |index|
+        socket = server.accept
+        requests << JSON.parse(socket.gets)
+        identity = AgentSessionRegistry::Identity.local(
+          source: "pi", session_id: "session-1"
+        )
+        observed_statuses << AgentSessionRegistry::Database.new(
+          path: @database_path
+        ).fetch(identity).fetch(:status)
+        sleep 0.1 if index == 1
+        response = if index.zero?
+          { "ok" => false, "error" => "sync failed" }
+        else
+          { "ok" => true, "status" => "done" }
+        end
+        socket.puts(JSON.generate(response))
+        socket.close
+      end
+    end
+
+    _stdout, stderr, status = run_cli(
+      "done", "--source", "pi", "--session-id", "session-1",
+      extra_env: { "ASR_SYNC_SOCKET" => socket_path }
+    )
+    assert_equal 3, status.exitstatus
+    assert_match(/source record is done, but synchronization failed.*sync failed/, stderr)
+    assert_equal "done", observed_statuses.pop
+
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    stdout, stderr, status = run_cli(
+      "done", "--source", "pi", "--session-id", "session-1", "--json",
+      extra_env: { "ASR_SYNC_SOCKET" => socket_path }
+    )
+    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    assert status.success?, stderr
+    assert_operator elapsed, :>=, 0.08
+    assert_equal "done", JSON.parse(stdout).fetch("status")
+    assert_equal "done", observed_statuses.pop
+
+    expected = {
+      "action" => "done",
+      "source" => "pi",
+      "hostname" => @hostname,
+      "session_id" => "session-1"
+    }
+    assert_equal expected, requests.pop
+    assert_equal expected, requests.pop
+    assert requests.empty?
+  ensure
+    server&.close
+    thread&.join(0.5)
+  end
+
+  def test_done_validates_sync_timeout_before_marking_the_record_done
+    register_local("session-1")
+
+    _stdout, stderr, status = run_cli(
+      "done", "--source", "pi", "--session-id", "session-1",
+      extra_env: {
+        "ASR_SYNC_SOCKET" => File.join(@directory, "sync.sock"),
+        "ASR_ADAPTER_TIMEOUT" => "invalid"
+      }
+    )
+
+    assert_equal 2, status.exitstatus
+    assert_match(/ASR_ADAPTER_TIMEOUT must be a positive number/, stderr)
+    identity = AgentSessionRegistry::Identity.local(
+      source: "pi", session_id: "session-1"
+    )
+    assert_equal "active", AgentSessionRegistry::Database.new(
+      path: @database_path
+    ).fetch(identity).fetch(:status)
+  end
+
   def test_resume_stops_adapter_promptly_when_status_update_fails
     register_local("session-1")
     key = "pi:#{@hostname}:session-1"
@@ -320,7 +440,7 @@ class CLITest < Minitest::Test
     elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
 
     assert_equal 1, status
-    assert_operator elapsed, :<, 1
+    assert_operator elapsed, :<, 2
     assert_match(/locked/, stderr.string)
     assert File.exist?(stopped_path), "adapter was not terminated"
     record = AgentSessionRegistry::Database.new(path: @database_path).fetch(

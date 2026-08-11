@@ -2,12 +2,12 @@
 
 Agent Session Registry (`asr`) keeps a small, queryable record of agent sessions.
 Each machine owns its registry database. A registry can describe sessions on the
-local machine and sessions on remote machines, but it does not synchronize data
-between machines.
+local machine and sessions on remote machines. An active adapter connection can
+synchronize one remote session with its source record.
 
 `asr` has no daemon. It runs one command, updates SQLite when necessary, and
 exits. It does not run arbitrary commands from the database. A named adapter
-can perform only a supported action such as `resume`.
+can perform only a supported action such as `start`, `inspect`, or `resume`.
 
 ## Requirements
 
@@ -97,6 +97,16 @@ asr done pi:workstation:session-1
 asr done --source pi --session-id session-1
 ```
 
+Start and register a remote session through an adapter:
+
+```sh
+asr start pi-dev --cwd /home/user/projects/repository
+```
+
+The start command generates the session ID. It does not accept a display name.
+The adapter reports the source name and other authoritative metadata after the
+source record appears.
+
 Resume a session through its registered adapter:
 
 ```sh
@@ -118,9 +128,10 @@ Every record has these fixed columns:
 - `created_at` and `updated_at`
 
 `active` means that the session is current and appears in the default list.
-`done` removes it from the default list but keeps its history. `asr resume`
-starts the adapter first. After the process starts, `asr` changes the record to
-`active`, waits for the adapter, and returns the adapter exit status.
+`done` removes it from the default list but keeps its history. Local resume keeps
+the existing local behavior. Remote resume first asks its adapter to inspect the
+source record. A source `done` status is authoritative and cannot change back to
+`active`. ASR then waits for the interactive adapter and returns its exit status.
 
 ## Storage and adapter locations
 
@@ -156,10 +167,24 @@ the adapter without a shell and passes exactly three arguments:
 ACTION RENDERED_KEY JSON_CONFIG
 ```
 
-Currently, the CLI dispatches only the `resume` action. The JSON value is the
-object stored in `adapter_config`. The adapter must validate the action and all
-configuration before it starts another program. For example, install this as
-an executable file named `pi-local` in the adapter directory:
+Resume and inspect receive the rendered record key and the object stored in
+`adapter_config`. Start receives an empty rendered key and this exact generic
+configuration:
+
+```json
+{"session_id":"<generated-id>","cwd":"<requested-working-directory>"}
+```
+
+A start-capable remote adapter name has the exact form `<source>-<hostname>`.
+ASR derives the expected new record identity from that name. For example,
+`pi-dev` can register only `pi:dev:<generated-id>`. The registered working
+directory must equal the requested directory, and the returned session file
+must be a non-empty absolute path. The hostname can contain hyphens. For
+example, `pi-dev-box` can register `pi:dev-box:<generated-id>`.
+
+The adapter must validate its action, key, configuration, host, and path policy
+before it starts another program. For example, install this as an executable
+file named `pi-local` in the adapter directory:
 
 ```ruby
 #!/usr/bin/env ruby
@@ -182,6 +207,51 @@ exec("pi", "--session", session_file)
 
 This example uses an argument array with `exec`; it does not build a shell
 command from record values.
+
+## Interactive adapter protocol
+
+For start, inspect, and connected remote resume, ASR creates a private inherited
+file descriptor. Its number is in `ASR_ADAPTER_EVENT_FD`. The adapter writes
+newline-delimited JSON only to this descriptor. Terminal output stays on
+standard input, output, and error.
+
+The exact event schemas are:
+
+```json
+{"type":"registered","source":"pi","hostname":"host","session_id":"id","status":"active","name":null,"cwd":"/path","session_file":"/path/session.jsonl"}
+{"type":"inspected","source":"pi","hostname":"host","session_id":"id","status":"active","name":"Name","cwd":"/path","session_file":"/path/session.jsonl"}
+{"type":"status","source":"pi","hostname":"host","session_id":"id","status":"done"}
+```
+
+ASR validates exact keys, types, identity, status, size, framing, and timeouts.
+The selected adapter name comes from the command or stored record, never from an
+event. Adapter code remains responsible for environment-specific host and path
+validation.
+
+During connected start and remote resume, ASR also creates one private Unix
+socket and passes its path in `ASR_ADAPTER_SYNC_SOCKET`. An adapter can forward
+that socket to the source host. The adapter must set the forwarded path as
+`ASR_SYNC_SOCKET` for the source-side `asr done` process. That process sends:
+
+```json
+{"action":"done","source":"pi","hostname":"host","session_id":"id"}
+```
+
+The connection-scoped listener accepts only the active identity and responds
+with one of:
+
+```json
+{"ok":true,"status":"done"}
+{"ok":false,"error":"message"}
+```
+
+This channel grants only an idempotent done transition for the active record.
+It is not a general command endpoint. ASR removes the socket when the adapter
+exits. No daemon, TCP listener, or standard-output protocol is used.
+
+`asr done` exits with status `3` only when it has already marked the source
+record done but the connection-scoped synchronization failed. Input failures
+exit with status `2`. Other runtime failures exit with status `1`.
 
 ## Tests
 

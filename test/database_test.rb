@@ -299,6 +299,62 @@ class DatabaseTest < Minitest::Test
     assert_equal first, second
   end
 
+  def test_reconcile_preserves_done_while_updating_source_metadata
+    original = @database.register(
+      registration_attributes.merge(remote: true, status: "done", adapter: "pi-dev")
+    )
+    advance_clock
+
+    reconciled = @database.reconcile(
+      identity,
+      status: "active",
+      name: "Remote name",
+      cwd: "/home/brian/projects/repo",
+      adapter_config: { "session_file" => "/sessions/two.jsonl" }
+    )
+
+    assert_equal "done", reconciled.fetch(:status)
+    assert_equal "Remote name", reconciled.fetch(:name)
+    assert_equal "/home/brian/projects/repo", reconciled.fetch(:cwd)
+    assert_equal({ "session_file" => "/sessions/two.jsonl" }, reconciled.fetch(:adapter_config))
+    unchanged = original.keys - %i[status name cwd adapter_config updated_at]
+    unchanged.each { |field| assert_equal original.fetch(field), reconciled.fetch(field), field }
+    assert_equal "2026-08-09T12:01:00.000000Z", reconciled.fetch(:updated_at)
+  end
+
+  def test_reconcile_applies_incoming_done_and_is_idempotent
+    @database.register(registration_attributes)
+    advance_clock
+
+    first = @database.reconcile(identity, status: "done")
+    advance_clock
+    second = @database.reconcile(identity, status: "done")
+
+    assert_equal "done", first.fetch(:status)
+    assert_equal first, second
+  end
+
+  def test_reconcile_returns_nil_for_missing_identity
+    missing = AgentSessionRegistry::Identity.new(
+      source: "pi",
+      hostname: "workstation",
+      session_id: "missing"
+    )
+
+    assert_nil @database.reconcile(missing, status: "done")
+  end
+
+  def test_reconcile_rejects_fields_that_can_change_authority
+    @database.register(registration_attributes)
+
+    %i[remote adapter unknown].each do |field|
+      error = assert_raises(ArgumentError, field.to_s) do
+        @database.reconcile(identity, field => "untrusted")
+      end
+      assert_match field.to_s, error.message
+    end
+  end
+
   def test_list_defaults_to_active_and_orders_newest_first
     @database.register(registration_attributes.merge(session_id: "older"))
     advance_clock

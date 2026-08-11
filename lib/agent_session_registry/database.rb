@@ -12,6 +12,7 @@ module AgentSessionRegistry
     SCHEMA_VERSION = 2
     STATUSES = %w[active done].freeze
     MUTABLE_FIELDS = %i[remote status name cwd adapter adapter_config].freeze
+    RECONCILE_FIELDS = %i[status name cwd adapter_config].freeze
     SELECT_FIELDS = Record::FIELDS.join(", ")
 
     CREATE_SESSIONS = <<~SQL.freeze
@@ -69,6 +70,29 @@ module AgentSessionRegistry
         if current.nil?
           nil
         elsif normalized.empty? || normalized.all? { |field, value| current.fetch(field) == value }
+          current
+        else
+          update_row(database, identity, normalized, timestamp)
+          fetch_from(database, identity)
+        end
+      end
+    end
+
+    def reconcile(identity, changes)
+      identity = coerce_identity(identity)
+      normalized = normalize_reconciliation(changes)
+
+      mutate do |database|
+        current = fetch_from(database, identity)
+        next nil unless current
+
+        if current.fetch(:status) == "done" ||
+            normalized.fetch(:status, current.fetch(:status)) == "done"
+          normalized[:status] = "done"
+        end
+
+        if normalized.empty? ||
+            normalized.all? { |field, value| current.fetch(field) == value }
           current
         else
           update_row(database, identity, normalized, timestamp)
@@ -211,6 +235,19 @@ module AgentSessionRegistry
         when :remote then validate_remote(value)
         when :status then validate_status(value)
         when :adapter then validate_adapter(value)
+        when :adapter_config then validate_adapter_config(value)
+        else validate_text(field, value)
+        end
+        [field, normalized]
+      end
+    end
+
+    def normalize_reconciliation(changes)
+      changes = symbolize_hash(changes, "changes")
+      reject_unknown_fields(changes, RECONCILE_FIELDS)
+      changes.to_h do |field, value|
+        normalized = case field
+        when :status then validate_status(value)
         when :adapter_config then validate_adapter_config(value)
         else validate_text(field, value)
         end

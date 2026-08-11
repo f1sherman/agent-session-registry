@@ -3,12 +3,16 @@
 require "fileutils"
 require "json"
 require "optparse"
+require "pathname"
 require "sqlite3"
 
 require_relative "adapter"
+require_relative "adapter_event"
 require_relative "database"
+require_relative "done_synchronizer"
 require_relative "identity"
 require_relative "record"
+require_relative "session_runner"
 
 module AgentSessionRegistry
   class CLI
@@ -16,7 +20,8 @@ module AgentSessionRegistry
     class StorageError < StandardError; end
     class HelpRequested < StandardError; end
 
-    COMMANDS = %w[list show register update done resume].freeze
+    COMMANDS = %w[list show register update done start resume].freeze
+    DEFAULT_ADAPTER_TIMEOUT = 5.0
 
     def self.run(argv, out:, err:, env:)
       new(out: out, err: err, env: env).run(argv.dup)
@@ -45,7 +50,12 @@ module AgentSessionRegistry
     rescue OptionParser::ParseError, InputError, ArgumentError, JSON::ParserError, EncodingError => error
       @err.puts "asr: #{error.message}"
       2
-    rescue Adapter::Error, StorageError, SQLite3::Exception, SystemCallError => error
+    rescue DoneSynchronizer::Error => error
+      @err.puts "asr: source record is done, but synchronization failed: #{error.message}"
+      3
+    rescue Adapter::Error, AdapterEvent::Error,
+      SessionRunner::Error, StorageError, SQLite3::Exception,
+      SystemCallError => error
       @err.puts "asr: #{error.message}"
       1
     end
@@ -62,6 +72,7 @@ module AgentSessionRegistry
           asr register   Register or replace a session
           asr update     Update one session
           asr done       Mark one session done
+          asr start      Start and register a session through an adapter
           asr resume     Resume one session through its adapter
 
         Run `asr COMMAND --help` for command options.
@@ -192,10 +203,41 @@ module AgentSessionRegistry
         add_help(opts)
       end
       parse!(parser, argv)
-      record = database.done(resolve_identity(argv, identity_options))
+      identity = resolve_identity(argv, identity_options)
+      socket = @env.fetch("ASR_SYNC_SOCKET", "").strip
+      timeout = adapter_timeout unless socket.empty?
+
+      record = database.done(identity)
       raise InputError, "record not found" unless record
 
+      unless socket.empty?
+        DoneSynchronizer.call(
+          socket_path: socket,
+          identity: identity,
+          timeout: timeout
+        )
+      end
+
       write_record(record, json: output_options[:json])
+    end
+
+    def run_start(argv)
+      options = {}
+      parser = OptionParser.new do |opts|
+        opts.banner = "Usage: asr start ADAPTER --cwd ABSOLUTE_REMOTE_PATH"
+        opts.on("--cwd PATH", "Remote working directory") { |value| options[:cwd] = value }
+        add_help(opts)
+      end
+      parse!(parser, argv)
+      require_options(options, :cwd)
+      raise InputError, "expected exactly one adapter name" unless argv.length == 1
+
+      cwd = options.fetch(:cwd)
+      unless cwd.is_a?(String) && !cwd.empty? && Pathname.new(cwd).absolute?
+        raise InputError, "--cwd must be a non-empty absolute path"
+      end
+
+      session_runner.start(adapter_name: argv.fetch(0), cwd: cwd)
     end
 
     def run_resume(argv)
@@ -205,25 +247,7 @@ module AgentSessionRegistry
       end
       parse!(parser, argv)
       identity = one_key(argv)
-      record = fetch_record(identity)
-      adapter = Adapter.new(directory: adapter_directory)
-      pid = adapter.spawn(
-        name: record.fetch(:adapter),
-        action: "resume",
-        key: identity.key,
-        config: record.fetch(:adapter_config)
-      )
-      begin
-        database.update(identity, status: "active")
-      rescue StandardError => error
-        begin
-          adapter.stop(pid)
-        rescue Adapter::Error
-          nil
-        end
-        raise error
-      end
-      adapter.wait(pid)
+      session_runner.resume(identity: identity, record: fetch_record(identity))
     end
 
     def registration_identity(options)
@@ -344,6 +368,27 @@ module AgentSessionRegistry
         "ASR_ADAPTER_DIR",
         File.join(Dir.home, ".local/lib/agent-session-registry/adapters")
       )
+    end
+
+    def session_runner
+      @session_runner ||= SessionRunner.new(
+        database: database,
+        adapter: Adapter.new(directory: adapter_directory),
+        runtime_root: @env.fetch(
+          "ASR_RUNTIME_DIR",
+          File.join(Dir.home, ".local/state/agent-session-registry/runtime")
+        ),
+        event_timeout: adapter_timeout
+      )
+    end
+
+    def adapter_timeout
+      value = Float(@env.fetch("ASR_ADAPTER_TIMEOUT", DEFAULT_ADAPTER_TIMEOUT))
+      raise InputError, "ASR_ADAPTER_TIMEOUT must be positive" unless value.positive?
+
+      value
+    rescue ArgumentError, TypeError
+      raise InputError, "ASR_ADAPTER_TIMEOUT must be a positive number"
     end
 
     def sort_records(records)
