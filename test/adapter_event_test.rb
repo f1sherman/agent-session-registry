@@ -181,8 +181,14 @@ class AdapterEventTest < Minitest::Test
 
   def assert_read_error(content, close_writer: false, max_bytes: nil)
     reader, writer = IO.pipe
-    writer.write(content)
-    writer.close if close_writer
+    writer_thread = Thread.new do
+      begin
+        writer.write(content)
+        writer.close if close_writer
+      rescue Errno::EPIPE, IOError
+        # The reader can reject the event before the writer finishes.
+      end
+    end
 
     arguments = { timeout: 1 }
     arguments[:max_bytes] = max_bytes if max_bytes
@@ -192,6 +198,7 @@ class AdapterEventTest < Minitest::Test
   ensure
     reader&.close
     writer&.close unless writer&.closed?
+    writer_thread&.join
   end
 
   def invalid_events(event)
