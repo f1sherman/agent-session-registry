@@ -168,6 +168,41 @@ class AdapterOwnershipTest < Minitest::Test
     slave&.close
   end
 
+  def test_wait_remains_interruptible_before_direct_child_completion
+    adapter, pid, child = spawn_fixture("stopped")
+    wait_for_stopped(pid)
+    assert_raises(Timeout::Error) { Timeout.timeout(0.05) { adapter.wait(pid) } }
+    assert_equal 1, adapter.stop(pid)
+    assert_reaped(child)
+  end
+
+  def test_timeout_after_direct_reap_cannot_abandon_descendant_cleanup
+    adapter, pid, child = spawn_fixture("exit")
+    injected = false
+    trace = TracePoint.new(:call) do |event|
+      next unless event.defined_class == AgentSessionRegistry::OwnedAdapterProcess && event.method_id == :signal
+      trace.disable
+      injected = true
+      Thread.current.raise(Timeout::Error)
+    end
+    assert_raises(Timeout::Error) do
+      trace.enable { adapter.wait(pid) }
+    end
+    assert injected, "timeout was not injected at the actual cleanup boundary"
+    status = nil
+    error = nil
+    begin
+      status = adapter.stop(pid)
+    rescue AgentSessionRegistry::Adapter::Error => exception
+      error = exception
+    end
+    assert_nil error, "stop could not finish interrupted collection: #{error}"
+    assert_equal 17, status
+    assert_reaped(child)
+  ensure
+    trace&.disable
+  end
+
   def test_wait_and_stop_share_completion_without_competing_reaps
     adapter, pid, child = spawn_fixture("stopped")
     wait_for_stopped(pid)

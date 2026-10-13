@@ -45,24 +45,29 @@ module AgentSessionRegistry
 
     def collect(force: false)
       @mutex.synchronize do
-        return @status unless @status.nil?
-        if force
-          signal("KILL", -@pid)
-          signal("KILL", @pid)
-        end
-        result = Process.wait2(@pid, force ? 0 : Process::WNOHANG)
-        return nil unless result
+        # Timeout.timeout can asynchronously interrupt the caller's waiter.
+        # Do not lose a reaped PID before owned-group cleanup and status storage
+        # finish. The outer polling wait remains interruptible while active.
+        Thread.handle_interrupt(Exception => :never) do
+          return @status unless @status.nil?
+          if force
+            signal("KILL", -@pid)
+            signal("KILL", @pid)
+          end
+          result = Process.wait2(@pid, force ? 0 : Process::WNOHANG)
+          return nil unless result
 
-        # Kill leftover members before returning even after normal completion.
-        # Once their parents die, Linux adopts them here. Waiting on -pgid
-        # drains only this invocation, including deeper adopted descendants.
-        signal("KILL", -@pid)
-        loop do
-          Process.waitpid(-@pid)
-        rescue Errno::ECHILD
-          break
+          # Kill leftover members before returning even after normal completion.
+          # Once their parents die, Linux adopts them here. Waiting on -pgid
+          # drains only this invocation, including deeper adopted descendants.
+          signal("KILL", -@pid)
+          loop do
+            Process.waitpid(-@pid)
+          rescue Errno::ECHILD
+            break
+          end
+          @status = result.last.exitstatus || 1
         end
-        @status = result.last.exitstatus || 1
       end
     end
 
