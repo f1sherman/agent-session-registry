@@ -10,8 +10,21 @@ module AgentSessionRegistry
 
     STOP_GRACE_SECONDS = 1.0
 
-    def initialize(directory:)
+    def initialize(directory:, descendant_cleanup: :auto)
       @directory = File.realpath(directory)
+      unless [:auto, true, false].include?(descendant_cleanup)
+        raise ArgumentError, "descendant_cleanup must be :auto, true, or false"
+      end
+      supported = RUBY_PLATFORM.include?("linux") && !$stdin.tty?
+      if descendant_cleanup == true && !supported
+        raise Error, "adapter descendant cleanup requires Linux without terminal input"
+      end
+      @descendant_cleanup = descendant_cleanup != false && supported
+      @owned_processes = {}
+      if @descendant_cleanup
+        require_relative "owned_adapter_process"
+        OwnedAdapterProcess.enable_adoption
+      end
     rescue SystemCallError => error
       raise Error, "adapter directory is unavailable: #{error.message}"
     end
@@ -20,6 +33,7 @@ module AgentSessionRegistry
       candidate = resolve(name)
       environment = {}
       options = { in: $stdin, out: $stdout, err: $stderr, close_others: true }
+      options[:pgroup] = true if @descendant_cleanup
       if event_io
         event_fd = event_io.fileno
         environment["ASR_ADAPTER_EVENT_FD"] = event_fd.to_s
@@ -31,12 +45,15 @@ module AgentSessionRegistry
 
       arguments = [candidate, action, key, JSON.generate(config), options]
       arguments.unshift(environment) unless environment.empty?
-      Process.spawn(*arguments)
+      pid = Process.spawn(*arguments)
+      @owned_processes[pid] = OwnedAdapterProcess.new(pid) if @descendant_cleanup
+      pid
     rescue SystemCallError => error
       raise Error, "could not start adapter #{name.inspect}: #{error.message}"
     end
 
     def wait(pid)
+      return @owned_processes.fetch(pid).wait if @owned_processes.key?(pid)
       status = Process.wait2(pid).last
       status.exitstatus || 1
     rescue SystemCallError => error
@@ -44,6 +61,9 @@ module AgentSessionRegistry
     end
 
     def stop(pid)
+      if @owned_processes.key?(pid)
+        return @owned_processes.fetch(pid).stop(grace: STOP_GRACE_SECONDS)
+      end
       Process.kill("TERM", pid)
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + STOP_GRACE_SECONDS
       loop do

@@ -9,7 +9,8 @@ class AdapterTest < Minitest::Test
     @adapter_path = File.join(@directory, "pi-local")
     File.write(@adapter_path, "#!/usr/bin/env ruby\nexit 0\n")
     File.chmod(0o755, @adapter_path)
-    @adapter = AgentSessionRegistry::Adapter.new(directory: @directory)
+    # Argument probes use invented PIDs and must not claim real process groups.
+    @adapter = AgentSessionRegistry::Adapter.new(directory: @directory, descendant_cleanup: false)
   end
 
   def teardown

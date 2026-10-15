@@ -13,6 +13,7 @@ can perform only a supported action such as `start`, `inspect`, or `resume`.
 
 - Ruby
 - The Ruby `sqlite3` gem and its SQLite requirement
+- The Ruby `fiddle` gem for Linux child adoption
 - Git, for installation from this repository
 
 Install from Git and run the public executable:
@@ -207,6 +208,27 @@ exec("pi", "--session", session_file)
 
 This example uses an argument array with `exec`; it does not build a shell
 command from record values.
+
+## Adapter process ownership
+
+On Linux without terminal input, each adapter runs in a private process group.
+`Adapter#wait` and `Adapter#stop` kill remaining members and reap adopted children
+in that group before returning. The adapter's direct exit status is preserved.
+Stop still allows one second for graceful adapter cleanup before forced shutdown.
+Concurrent wait and stop calls share the completed result.
+
+Linux supervision enables the ASR process's child-subreaper setting for its
+remaining lifetime. This can adopt unrelated orphan children, but ASR signals and
+reaps only the adapter's private group. It never performs a general child drain.
+Embedders can pass `descendant_cleanup: false` to `Adapter.new` to keep the
+previous direct-child-only behavior and adoption policy.
+
+The default `descendant_cleanup: :auto` keeps that previous behavior on other
+platforms and when standard input is a terminal. This preserves interactive
+foreground terminal access; those modes do not gain a forced-descendant-reaping
+guarantee. Explicit `true` rejects those unsupported modes before spawning.
+Descendants that deliberately leave the private group, and forced termination
+of ASR itself, remain outside the cleanup guarantee.
 
 ## Interactive adapter protocol
 
